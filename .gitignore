@@ -1,6 +1,8 @@
-.terraform/
+**/.terraform/
+.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
+*.tfplan
 crash.log
 crash.*.log
 terraform.tfvars
@@ -11,6 +13,7 @@ override.tf.json
 *_override.tf.json
 .terraformrc
 terraform.rc
+*.pem
 .helmcache/
 .helmconfig/
 .helm

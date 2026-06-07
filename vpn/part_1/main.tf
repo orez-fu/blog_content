@@ -6,6 +6,14 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
+    }
   }
 }
 
@@ -218,12 +226,57 @@ data "aws_ami" "amazon_linux_2023" {
   }
 }
 
+resource "tls_private_key" "vpn_ssh" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "vpn_ssh" {
+  key_name   = "vpn-demo-ssh-key"
+  public_key = tls_private_key.vpn_ssh.public_key_openssh
+
+  tags = {
+    Name = "vpn-demo-ssh-key"
+  }
+}
+
+resource "local_sensitive_file" "vpn_ssh_private_key" {
+  content         = tls_private_key.vpn_ssh.private_key_pem
+  filename        = "${path.module}/vpn-demo-ssh-key.pem"
+  file_permission = "0600"
+}
 
 resource "aws_instance" "openvpn" {
-  ami                    = data.aws_ami.openvpn_access_server.id
-  instance_type          = "t3.micro"
-  subnet_id              = aws_subnet.public.id
-  vpc_security_group_ids = [aws_security_group.openvpn.id]
+  ami                         = data.aws_ami.openvpn_access_server.id
+  instance_type               = "t3.micro"
+  key_name                    = aws_key_pair.vpn_ssh.key_name
+  subnet_id                   = aws_subnet.public.id
+  vpc_security_group_ids      = [aws_security_group.openvpn.id]
+  user_data_replace_on_change = true
+
+  user_data = <<EOF
+#!/bin/bash
+set -euo pipefail
+
+install -d -m 700 /root/.ssh
+cat > /root/.ssh/private-test-server.pem <<'KEY'
+${tls_private_key.vpn_ssh.private_key_pem}
+KEY
+chmod 600 /root/.ssh/private-test-server.pem
+cp /root/.ssh/private-test-server.pem /root/.ssh/id_rsa
+chmod 600 /root/.ssh/id_rsa
+
+if id openvpnas >/dev/null 2>&1; then
+  install -d -m 700 -o openvpnas -g openvpnas /home/openvpnas/.ssh
+  cp /root/.ssh/private-test-server.pem /home/openvpnas/.ssh/private-test-server.pem
+  cp /root/.ssh/private-test-server.pem /home/openvpnas/.ssh/id_rsa
+  chown openvpnas:openvpnas /home/openvpnas/.ssh/private-test-server.pem
+  chown openvpnas:openvpnas /home/openvpnas/.ssh/id_rsa
+  chmod 600 /home/openvpnas/.ssh/private-test-server.pem
+  chmod 600 /home/openvpnas/.ssh/id_rsa
+fi
+
+EOF
 
   tags = {
     Name = "openvpn-access-server"
@@ -233,6 +286,7 @@ resource "aws_instance" "openvpn" {
 resource "aws_instance" "private_ec2" {
   ami                    = data.aws_ami.amazon_linux_2023.id
   instance_type          = "t3.micro"
+  key_name               = aws_key_pair.vpn_ssh.key_name
   subnet_id              = aws_subnet.private.id
   vpc_security_group_ids = [aws_security_group.private_ec2.id]
 
@@ -262,4 +316,21 @@ output "openvpn_public_ip" {
 
 output "private_ec2_ip" {
   value = aws_instance.private_ec2.private_ip
+}
+
+output "private_ec2_ssh_command" {
+  value = "ssh -i ${local_sensitive_file.vpn_ssh_private_key.filename} ec2-user@${aws_instance.private_ec2.private_ip}"
+}
+
+output "ssh_key_pair_name" {
+  value = aws_key_pair.vpn_ssh.key_name
+}
+
+output "ssh_private_key_file" {
+  value = local_sensitive_file.vpn_ssh_private_key.filename
+}
+
+output "ssh_private_key_pem" {
+  value     = tls_private_key.vpn_ssh.private_key_pem
+  sensitive = true
 }
